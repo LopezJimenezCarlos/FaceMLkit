@@ -52,11 +52,33 @@ import com.lopezzzcut.myapplication.ui.DetectorFacial
 import com.lopezzzcut.myapplication.ui.theme.MyApplicationTheme
 import java.util.concurrent.Executors
 import android.Manifest
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.RectF
 import android.graphics.Color
+import android.graphics.ImageFormat
+import android.graphics.Matrix
 import android.graphics.Paint
-
+import android.graphics.Path
+import android.graphics.PointF
+import android.graphics.Rect
+import android.graphics.YuvImage
+import android.media.Image
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.unit.sp
+import androidx.core.graphics.minus
+import com.google.mlkit.vision.face.Face
+import com.google.mlkit.vision.face.FaceContour
+import com.google.mlkit.vision.face.FaceContour.LEFT_EYE
+import com.google.mlkit.vision.face.FaceContour.RIGHT_EYE
+import com.google.mlkit.vision.face.FaceLandmark
+import com.google.mlkit.vision.face.FaceLandmark.MOUTH_BOTTOM
+import java.io.ByteArrayOutputStream
 
 
 class MainActivity : ComponentActivity() {
@@ -180,6 +202,7 @@ fun CameraScreen() {
         mutableStateOf("")
     }
     var isLoading by remember { mutableStateOf(false) }
+    var faceImage by remember { mutableStateOf<ImageBitmap?>(null) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
@@ -205,10 +228,24 @@ fun CameraScreen() {
                                 imageProxy.imageInfo.rotationDegrees
                             )
 
-                            textRecognizer.process(img).addOnCompleteListener { task ->
+                            textRecognizer.process(img).addOnSuccessListener { faces ->
                                 isLoading = false
-                                text = if (!task.isSuccessful) task.exception!!.localizedMessage.toString()
-                                        else task.result?.size.toString()
+
+                                if (faces.isNotEmpty()) {
+                                    val face = faces[0] // Assuming only one face is detected
+
+                                    // Get face shape information
+                                    val faceShape = getFaceShape(face)
+
+                                    // Process face shape information (you can update UI accordingly)
+                                    text = "Face Shape: $faceShape"
+
+                                    // Draw landmarks and face shape on the image
+                                    faceImage = drawFaceLandmarks(image, face)
+                                } else {
+                                    text = "No face detected"
+                                }
+
                                 cameraController.clearImageAnalysisAnalyzer()
                                 imageProxy.close()
                             }
@@ -228,22 +265,158 @@ fun CameraScreen() {
 
     if (text.isNotEmpty()) {
         Dialog(onDismissRequest = { text = "" }) {
-            Card(modifier = Modifier.fillMaxWidth(0.8f)) {
-                Text(
-                    text = text,
-                    modifier = Modifier.padding(horizontal = 16.dp).padding(top = 16.dp),
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Button(
-                    onClick = { text = "" },
-                    modifier = Modifier.align(Alignment.End).padding(horizontal = 16.dp, vertical = 16.dp)
-                ) {
-                    Text(text = "Done")
+            Card() { // Ajusta el tamaño aquí
+                Column {
+                    Text(
+                        text = text,
+                        modifier = Modifier.padding(32.dp),
+                        fontSize = 24.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                    faceImage?.let {
+                        Image(bitmap = it, contentDescription = "Face with landmarks", modifier = Modifier.fillMaxWidth().size(300.dp))
+                    }
+                    Button(
+                        onClick = { text = "" },
+                        modifier = Modifier.align(Alignment.CenterHorizontally).padding(horizontal = 16.dp, vertical = 16.dp)
+                    ) {
+                        Text("Close")
+                    }
                 }
             }
         }
     }
 }
+fun Bitmap.rotate(degree: Float): Bitmap {
+    val matrix = Matrix()
+    matrix.postRotate(degree)
+    return Bitmap.createBitmap(this, 0, 0, this.width, this.height, matrix, true)
+}
+
+fun drawFaceLandmarks(image: Image, face: Face): ImageBitmap {
+    var bitmap = image.toBitmap()
+    bitmap = bitmap.rotate(270f) // Ajusta el ángulo de rotación si es necesario
+
+    val canvas = Canvas(bitmap)
+    val paint1 = Paint().apply {
+        color = Color.RED
+        style = Paint.Style.STROKE
+        strokeWidth = 1f
+    }
+    val paint2 = Paint().apply {
+        color = Color.GREEN
+        style = Paint.Style.STROKE
+        strokeWidth = 2f
+    }
+    face.boundingBox.let {
+        val rect = RectF(it.left.toFloat(), it.top.toFloat(), it.right.toFloat(), it.bottom.toFloat())
+        canvas.drawRect(rect, paint2)
+    }
+    // Draw landmarks
+    for (landmark in face.allLandmarks) {
+        val point = landmark.position
+        canvas.drawCircle(point.x, point.y, 10f, paint1)
+    }
+
+    // Draw face contour
+    val path = Path()
+    for (i in 0 until (face.getContour(FaceContour.FACE)?.points?.size ?: 0)) {
+        val point = face.getContour(FaceContour.FACE)?.points?.get(i)
+        if (i == 0) {
+            if (point != null) {
+                path.moveTo(point.x, point.y)
+            }
+        } else {
+            if (point != null) {
+                path.lineTo(point.x, point.y)
+            }
+        }
+    }
+    path.close()
+    canvas.drawPath(path, paint1)
+
+    // Convert the Bitmap to ImageBitmap for Compose
+    return bitmap.asImageBitmap()
+}
+
+fun Image.toBitmap(): Bitmap {
+    val yBuffer = planes[0].buffer // Y
+    val uBuffer = planes[1].buffer // U
+    val vBuffer = planes[2].buffer // V
+
+    val ySize = yBuffer.remaining()
+    val uSize = uBuffer.remaining()
+    val vSize = vBuffer.remaining()
+
+    val nv21 = ByteArray(ySize + uSize + vSize)
+
+    //U and V are swapped
+    yBuffer.get(nv21, 0, ySize)
+    vBuffer.get(nv21, ySize, vSize)
+    uBuffer.get(nv21, ySize + vSize, uSize)
+
+    val yuvImage = YuvImage(nv21, ImageFormat.NV21, this.width, this.height, null)
+    val out = ByteArrayOutputStream()
+    yuvImage.compressToJpeg(Rect(0, 0, yuvImage.width, yuvImage.height), 100, out)
+    val imageBytes = out.toByteArray()
+    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size).copy(Bitmap.Config.ARGB_8888, true)
+}
+
+fun getFaceShape(face: Face): String {
+    val leftEye = face.getLandmark(LEFT_EYE)?.position
+    val rightEye = face.getLandmark(RIGHT_EYE)?.position
+    val mouth = face.getLandmark(MOUTH_BOTTOM)?.position
+
+    if (leftEye != null && rightEye != null && mouth != null) {
+        val distanceEyeToEye = calculateDistance(leftEye, rightEye)
+        val distanceEyeToMouth = calculateDistance(leftEye, mouth)
+        val jawWidth = face.boundingBox.width().toFloat()
+        val leftCheek = face.getLandmark(FaceLandmark.LEFT_CHEEK)
+        val rightCheek = face.getLandmark(FaceLandmark.RIGHT_CHEEK)
+        val cheekWidth = calculateDistance(leftCheek!!.position, rightCheek!!.position)
+        val faceLength = face.boundingBox.height().toFloat()
+        val ratio = cheekWidth / faceLength
+        Log.d("MainActivity", "ratio: $ratio")
+        Log.d("MainActivity", "jawWidth: $cheekWidth")
+        Log.d("MainActivity", "faceLength: $faceLength")
+        return when {
+            isSquare(cheekWidth, cheekWidth) -> "Cuadrada"
+            isRound(cheekWidth) -> "Redonda"
+            isOval(cheekWidth, faceLength) -> "Ovalada"
+            isLong(cheekWidth) -> "Alargada"
+            else -> "Unknown"
+        }
+    }
+
+    return "Unknown"
+}
+
+fun calculateDistance(point1: PointF, point2: PointF): Float {
+    val dx = point1.x - point2.x
+    val dy = point1.y - point2.y
+    return Math.sqrt((dx * dx + dy * dy).toDouble()).toFloat()
+}
+
+fun isSquare(cheekWidth: Float, faceLength: Float): Boolean {
+    val ratio = cheekWidth / faceLength
+    return ratio > 0.40 && ratio < 47 && cheekWidth >100
+}
+
+fun isRound(cheekWidth: Float, ): Boolean {
+    return  cheekWidth  > 100
+}
+
+fun isOval(cheekWidth: Float, faceLength: Float): Boolean {
+    val ratio = cheekWidth / faceLength
+
+    return ratio > 0.35 && ratio < 50 && cheekWidth < 100
+}
+
+fun isLong( cheekWidth: Float): Boolean {
+    return cheekWidth < 100
+}
+fun Float.squared() = this * this
+
 
 @RequiresApi(Build.VERSION_CODES.R)
 @Preview(showBackground = true)
